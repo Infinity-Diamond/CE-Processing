@@ -6,7 +6,6 @@ matplotlib.use('Agg')  # Use a non-GUI backend
 import matplotlib.pyplot as plt
 import tkinter as tk
 from tkinter import filedialog, messagebox
-from tkinter import simpledialog
 
 # Optional: To detect file encoding dynamically
 try:
@@ -24,26 +23,6 @@ def ask_directory(title="Select a Directory", initialdir=os.path.expanduser("~")
         exit()
     return dir_path
 
-def ask_integer(title="Input Integer", prompt="Enter an integer:"):
-    root = tk.Tk()
-    root.withdraw()
-    user_input = simpledialog.askinteger(title, prompt, parent=root)
-    root.destroy()
-    if user_input is None:
-        messagebox.showwarning("No Input Provided", f"No input was provided for '{prompt}'. Exiting script.")
-        exit()
-    return user_input
-
-def ask_float(title="Input Float", prompt="Enter a floating-point number:"):
-    root = tk.Tk()
-    root.withdraw()
-    user_input = simpledialog.askfloat(title, prompt, parent=root)
-    root.destroy()
-    if user_input is None:
-        messagebox.showwarning("No Input Provided", f"No input was provided for '{prompt}'. Exiting script.")
-        exit()
-    return user_input
-
 def detect_encoding(file_path):
     if chardet:
         with open(file_path, 'rb') as f:
@@ -51,6 +30,71 @@ def detect_encoding(file_path):
             return result['encoding'] if result['encoding'] else 'latin-1'
     else:
         return 'latin-1'  # Fallback to a broader encoding
+
+def ask_parameters():
+    """
+    Opens a custom dialog that prompts for processing parameters. 
+    The user can either manually input values or click "Run Defaults" to use:
+        Start Line: 13, End Line: 10814, Sampling Rate: 4, Y-Axis Minimum: 2000, Y-Axis Maximum: 100000.
+    """
+    result = {}
+    top = tk.Tk()
+    top.title("Enter Processing Parameters")
+    
+    # Labels and Entry widgets with default values pre-inserted
+    tk.Label(top, text="Start Line:").grid(row=0, column=0, padx=5, pady=5, sticky="e")
+    start_line_entry = tk.Entry(top)
+    start_line_entry.insert(0, "13")
+    start_line_entry.grid(row=0, column=1, padx=5, pady=5)
+
+    tk.Label(top, text="End Line:").grid(row=1, column=0, padx=5, pady=5, sticky="e")
+    end_line_entry = tk.Entry(top)
+    end_line_entry.insert(0, "10814")
+    end_line_entry.grid(row=1, column=1, padx=5, pady=5)
+
+    tk.Label(top, text="Sampling Rate:").grid(row=2, column=0, padx=5, pady=5, sticky="e")
+    sampling_rate_entry = tk.Entry(top)
+    sampling_rate_entry.insert(0, "4")
+    sampling_rate_entry.grid(row=2, column=1, padx=5, pady=5)
+
+    tk.Label(top, text="Y-Axis Minimum:").grid(row=3, column=0, padx=5, pady=5, sticky="e")
+    y_min_entry = tk.Entry(top)
+    y_min_entry.insert(0, "2000")
+    y_min_entry.grid(row=3, column=1, padx=5, pady=5)
+
+    tk.Label(top, text="Y-Axis Maximum:").grid(row=4, column=0, padx=5, pady=5, sticky="e")
+    y_max_entry = tk.Entry(top)
+    y_max_entry.insert(0, "100000")
+    y_max_entry.grid(row=4, column=1, padx=5, pady=5)
+
+    def run_defaults():
+        result["start_line"] = 13
+        result["end_line"] = 10814
+        result["sampling_rate"] = 4
+        result["y_min"] = 2000
+        result["y_max"] = 100000
+        top.destroy()
+
+    def submit():
+        try:
+            result["start_line"] = int(start_line_entry.get())
+            result["end_line"] = int(end_line_entry.get())
+            result["sampling_rate"] = int(sampling_rate_entry.get())
+            result["y_min"] = float(y_min_entry.get())
+            result["y_max"] = float(y_max_entry.get())
+        except Exception as e:
+            messagebox.showerror("Invalid Input", "Please ensure all inputs are valid numbers.")
+            return
+        top.destroy()
+
+    run_defaults_button = tk.Button(top, text="Run Defaults", command=run_defaults)
+    run_defaults_button.grid(row=5, column=0, padx=5, pady=10)
+
+    submit_button = tk.Button(top, text="Submit", command=submit)
+    submit_button.grid(row=5, column=1, padx=5, pady=10)
+
+    top.mainloop()
+    return result
 
 def process_files(input_dir, output_dir_csv, output_dir_plots, start_line=13, end_line=10814, sampling_rate=4, y_min=None, y_max=None):
     # Ensure output directories exist
@@ -108,21 +152,19 @@ if __name__ == "__main__":
     print("Select the input directory containing .asc files:")
     input_dir = ask_directory("Select Input Directory")
 
-    print("Select the directory for CSV outputs:")
-    output_dir_csv = ask_directory("Select CSV Output Directory")
+    # Create CSV and PNG directories inside the selected input directory
+    output_dir_csv = os.path.join(input_dir, "CSV")
+    output_dir_plots = os.path.join(input_dir, "PNG")
+    os.makedirs(output_dir_csv, exist_ok=True)
+    os.makedirs(output_dir_plots, exist_ok=True)
 
-    print("Select the directory for plot outputs:")
-    output_dir_plots = ask_directory("Select Plot Output Directory")
-
-    # Optional: Ask user for start and end lines and sampling rate
-    start_line = ask_integer("Start Line", "Enter the starting line number (default is 13):") or 13
-    end_line = ask_integer("End Line", "Enter the ending line number (default is 10814):") or 10814
-    sampling_rate = ask_integer("Sampling Rate", "Enter the sampling rate (default is 4 samples/sec):") or 4
-
-    # Ask user for y-axis limits
-    y_min = ask_float("Y-Axis Minimum", "Enter the minimum value for the Y-axis (leave blank for auto):")
-    y_max = ask_float("Y-Axis Maximum", "Enter the maximum value for the Y-axis (leave blank for auto):")
+    # Prompt the user for processing parameters with an option to run defaults.
+    params = ask_parameters()
+    start_line = params["start_line"]
+    end_line = params["end_line"]
+    sampling_rate = params["sampling_rate"]
+    y_min = params["y_min"]
+    y_max = params["y_max"]
 
     process_files(input_dir, output_dir_csv, output_dir_plots, start_line, end_line, sampling_rate, y_min, y_max)
-
     messagebox.showinfo("Processing Complete", "All files have been processed successfully.")

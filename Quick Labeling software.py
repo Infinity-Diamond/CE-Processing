@@ -1,297 +1,536 @@
+import os
+import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from matplotlib.widgets import SpanSelector
-from tkinter import Tk, filedialog, simpledialog, messagebox
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.widgets import SpanSelector, RectangleSelector
 import matplotlib.patches as patches
+import tkinter as tk
+from tkinter import ttk, filedialog, simpledialog, messagebox
 
-# Global variables for labeling
-label_counter = 0
-current_label = 'A'
-df_filtered = None  # To store the filtered dataframe after zoom
-ax = None
-fig = None
-span_selector = None  # SpanSelector object
-cursor_label_annotation = None  # Annotation to show the next label at the cursor
-placed_labels = []  # List to store references to placed labels
-label_data = []  # List to store label, time, and signal for output to Excel
-custom_label_mode = False  # Flag to determine if a custom label is being used
-region_size = 1.0  # Initial region size for label selection
-region_square = None  # Patch object for the square showing the region
+class DataLabelingApp:
+    def __init__(self, master):
+        self.master = master
+        master.title("Data Labeling Tool")
 
-# Function to prompt user to select a CSV file
-def select_csv_file():
-    root = Tk()
-    root.withdraw()  # Hide the root window
-    file_path = filedialog.askopenfilename(
-        title="Select a CSV file",
-        filetypes=[("CSV files", "*.csv")]
-    )
-    if file_path:
-        load_and_plot_csv(file_path)
-    else:
-        print("No file selected")
+        # Dictionary to hold labels for each file.
+        # Keys: absolute file paths; Values: list of dict entries: {"label":, "time":, "signal":}
+        self.file_labels = {}
 
-# Function to read the CSV and plot the initial graph
-# Function to read the CSV and plot the initial graph
-def load_and_plot_csv(file_path):
-    global df, ax, fig, span_selector
-    df = pd.read_csv(file_path)  # Read the CSV file
-    df['Signal'] = df['Signal'] - df['Signal'].min()  # Shift signal to start from 0
-    
-    # Create the initial plot
-    fig, ax = plt.subplots(figsize=(12, 8))  # You can still adjust the figure size as needed
+        # ------------------------
+        # Overall Layout with PanedWindow (allows adjusting table vs. graph size)
+        # ------------------------
+        self.paned = tk.PanedWindow(master, orient=tk.HORIZONTAL)
+        self.paned.pack(fill=tk.BOTH, expand=True)
 
-    # Customize the appearance of the plot
-    ax.set_facecolor('black')
-    ax.plot(df['Time'], df['Signal'], label='Original Data', color='white')
-    ax.set_xlabel('Time', color='white')
-    ax.set_ylabel('Signal', color='white')
-    ax.set_title('Original Data Plot', color='white')
-    ax.tick_params(axis='x', colors='white')
-    ax.tick_params(axis='y', colors='white')
-    ax.legend(facecolor='black', edgecolor='white', labelcolor='white')
-    
-    # Set up the SpanSelector for zoom
-    span_selector = SpanSelector(ax, on_span_select, 'horizontal', useblit=True, props=dict(alpha=0.5, facecolor='red'))
+        self.left_frame = tk.Frame(self.paned)
+        self.right_frame = tk.Frame(self.paned)
+        self.paned.add(self.left_frame, minsize=250)
+        self.paned.add(self.right_frame)
 
-    # Set up the key event listener to handle labeling shortcuts
-    fig.canvas.mpl_connect('key_press_event', on_key_press)
+        # ------------------------
+        # Left Frame: File Carousel, Dropdown & Controls
+        # ------------------------
+        self.carousel_frame = tk.Frame(self.left_frame)
+        self.carousel_frame.pack(fill=tk.X, padx=5, pady=5)
 
-    connect_scroll_event()  # Connect the scroll event to adjust the region size
+        self.prev_button = tk.Button(self.carousel_frame, text="<< Prev", command=self.prev_file)
+        self.prev_button.pack(side=tk.LEFT)
 
-    # Get the figure manager and set the window size and position
-    manager = plt.get_current_fig_manager()
-    
-    # For TkAgg backend (Tkinter), we can use the following to set geometry
-    manager.window.wm_geometry(f"2560x800+0+0")  # Full width, top half height, positioned at the top
+        self.current_file_label = tk.Label(self.carousel_frame, text="No file selected", width=30)
+        self.current_file_label.pack(side=tk.LEFT, padx=5)
 
-    # Show the plot and keep interactive
-    plt.show()
+        self.next_button = tk.Button(self.carousel_frame, text="Next >>", command=self.next_file)
+        self.next_button.pack(side=tk.LEFT)
 
+        # Dropdown for file selection
+        self.file_dropdown = ttk.Combobox(self.left_frame, state="readonly")
+        self.file_dropdown.pack(fill=tk.X, padx=5, pady=5)
+        self.file_dropdown.bind("<<ComboboxSelected>>", self.on_file_dropdown)
 
-# Function to zoom in based on SpanSelector
-def on_span_select(xmin, xmax):
-    global df_filtered, ax, span_selector
-    if not df.empty:
-        df_filtered = df[(df['Time'] >= xmin) & (df['Time'] <= xmax)]
-        
-        # Clear the current axis (but not the figure) and plot the filtered data
-        ax.clear()
-        ax.set_facecolor('black')
-        ax.plot(df_filtered['Time'], df_filtered['Signal'], label='Filtered Data', color='white')
-        ax.set_xlabel('Time', color='white')  # Ensure x-axis remains visible
-        ax.set_ylabel('Signal', color='white')
-        ax.set_title(f'Data from Time {xmin:.2f} to {xmax:.2f}', color='white')
-        ax.tick_params(axis='x', colors='white')  # Ensure x-ticks remain visible
-        ax.tick_params(axis='y', colors='white')
-        ax.legend(facecolor='black', edgecolor='white', labelcolor='white')
-        plt.draw()
-        
-        # Ask if the user wants to proceed with this zoomed section
-        root = Tk()
-        root.withdraw()
-        confirm = messagebox.askyesno("Confirm Section", "Is this section okay for labeling?")
-        if confirm:
-            # Disable SpanSelector after zoom confirmation
-            span_selector.set_active(False)
-            enable_labeling()
+        # Import button (multiple file selection allowed)
+        self.import_button = tk.Button(self.left_frame, text="Import Files", command=self.import_files)
+        self.import_button.pack(pady=5)
+
+        # Manual Save Button for current datafile (labels & plot)
+        self.save_button = tk.Button(self.left_frame, text="Save File", command=self.save_plot_and_data)
+        self.save_button.pack(pady=5)
+
+        # ------------------------
+        # Left Frame: Label Table
+        # ------------------------
+        self.tree = ttk.Treeview(self.left_frame, columns=("Label", "Time", "Signal"), show="headings", height=15)
+        self.tree.heading("Label", text="Label")
+        self.tree.heading("Time", text="Time")
+        self.tree.heading("Signal", text="Signal")
+        self.tree.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.tree.bind("<Double-1>", self.on_tree_double_click)
+
+        self.delete_button = tk.Button(self.left_frame, text="Delete Selected Label", command=self.delete_selected_label)
+        self.delete_button.pack(pady=5)
+
+        # ------------------------
+        # Left Frame: Help Button
+        # ------------------------
+        self.help_button = tk.Button(self.left_frame, text="Help (h)", command=self.show_help)
+        self.help_button.pack(pady=5)
+
+        # ------------------------
+        # Right Frame: Embedded Matplotlib Figure
+        # ------------------------
+        self.fig, self.ax = plt.subplots(figsize=(8, 6))
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self.right_frame)
+        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        self.ax.set_facecolor('black')
+        self.ax.set_xlabel("Time")
+        self.ax.set_ylabel("Signal")
+        self.ax.tick_params(axis='x', colors='white')
+        self.ax.tick_params(axis='y', colors='white')
+
+        # ------------------------
+        # Global and State Variables
+        # ------------------------
+        self.df = None              # DataFrame for current file
+        self.df_filtered = None     # DataFrame after zoom
+        self.file_list = []         # List of imported file paths
+        self.current_file_index = 0 # Index for carousel
+        self.current_file_path = None
+
+        # For current file: list of placed label dictionaries:
+        # Each entry: {"label": label, "time": t, "signal": s, "ann": annotation, "dot": dot, "tree_id": tree id}
+        self.placed_labels = []
+        self.label_counter = 0      # Counter for labels (alphabetical in point mode, numeric in select mode)
+        self.custom_label_mode = False
+        self.region_size = 1.0      # Default region width
+
+        # Create a region highlight (vertical rectangle spanning full y-range)
+        self.region_square = patches.Rectangle((0, 0), self.region_size, 1, edgecolor='yellow',
+                                                 facecolor='yellow', alpha=0.2, lw=1)
+        self.ax.add_patch(self.region_square)
+
+        # Mode: "point" for single-click labeling (default) or "select" for rectangle selection
+        self.mode = "point"
+
+        # ------------------------
+        # Setup Selectors and Event Bindings
+        # ------------------------
+        # SpanSelector for zooming (for analysis)
+        self.span_selector = SpanSelector(self.ax, self.on_span_select, "horizontal", useblit=True,
+                                          props=dict(alpha=0.5, facecolor='red'))
+        # RectangleSelector for multi-select mode (initially inactive)
+        self.rectangle_selector = RectangleSelector(self.ax, self.on_rectangle_select, useblit=True,
+                                                      button=[1], interactive=True)
+        self.rectangle_selector.set_active(False)
+
+        # Annotation to show next label at the cursor (no region info now)
+        self.cursor_label_annotation = self.ax.annotate("", xy=(0, 0), xytext=(10, 10),
+                                                          textcoords="offset points", ha='center',
+                                                          color='yellow', fontsize=12)
+        self.ax.add_artist(self.cursor_label_annotation)
+
+        # Connect events on the canvas
+        self.canvas.mpl_connect("motion_notify_event", self.update_cursor_label)
+        self.canvas.mpl_connect("scroll_event", self.on_scroll)
+        self.canvas.mpl_connect("button_press_event", self.on_click)
+
+        # Bind keys to the main window (pressing 'b' cancels rectangle selection and hides the box)
+        self.master.bind("<Key>", self.on_key_press)
+
+    # ------------------------
+    # File Import and Carousel/Dropdown Functions
+    # ------------------------
+    def import_files(self):
+        file_paths = filedialog.askopenfilenames(title="Select CSV files", filetypes=[("CSV files", "*.csv")])
+        if file_paths:
+            self.file_list = list(file_paths)
         else:
-            reset_zoom()  # Reset the plot to original if the user doesn't confirm
+            folder = filedialog.askdirectory(title="Select Data Folder")
+            if folder:
+                self.file_list = [os.path.join(folder, f) for f in os.listdir(folder) if f.endswith(".csv")]
+        if self.file_list:
+            # Update dropdown list with base filenames.
+            self.file_dropdown['values'] = [os.path.basename(f) for f in self.file_list]
+            self.current_file_index = 0
+            self.load_file(self.file_list[self.current_file_index])
+            self.file_dropdown.current(self.current_file_index)
 
-# Function to reset the zoom if the user doesn't confirm
-def reset_zoom():
-    global ax, df
-    ax.clear()
-    ax.set_facecolor('black')
-    ax.plot(df['Time'], df['Signal'], label='Original Data', color='white')
-    ax.set_xlabel('Time', color='white')  # Ensure x-axis remains visible
-    ax.set_ylabel('Signal', color='white')
-    ax.set_title('Original Data Plot', color='white')
-    ax.tick_params(axis='x', colors='white')  # Ensure x-ticks remain visible
-    ax.tick_params(axis='y', colors='white')
-    ax.legend(facecolor='black', edgecolor='white', labelcolor='white')
-    plt.draw()
+    def prev_file(self):
+        if self.file_list:
+            self.save_current_file_labels()
+            self.current_file_index = (self.current_file_index - 1) % len(self.file_list)
+            self.load_file(self.file_list[self.current_file_index])
+            self.file_dropdown.current(self.current_file_index)
 
-# Function to enable labeling after zoom is confirmed
-def enable_labeling():
-    global ax, cursor_label_annotation, region_square
-    # Connect the click event to the on_click_label function
-    fig.canvas.mpl_connect('button_press_event', on_click_label)
+    def next_file(self):
+        if self.file_list:
+            self.save_current_file_labels()
+            self.current_file_index = (self.current_file_index + 1) % len(self.file_list)
+            self.load_file(self.file_list[self.current_file_index])
+            self.file_dropdown.current(self.current_file_index)
 
-    # Track mouse motion to display the next label at the cursor
-    fig.canvas.mpl_connect('motion_notify_event', update_cursor_label)
-    
-    # Create an initial cursor annotation
-    cursor_label_annotation = ax.annotate("", xy=(0, 0), xytext=(10, 10),
-                                          textcoords="offset points", ha='center', color='yellow', fontsize=12)
+    def on_file_dropdown(self, event):
+        idx = self.file_dropdown.current()
+        if idx >= 0:
+            self.save_current_file_labels()
+            self.current_file_index = idx
+            self.load_file(self.file_list[self.current_file_index])
 
-    # Add the region square
-    region_square = patches.Rectangle((0, 0), region_size, 1, edgecolor='yellow', facecolor='none', lw=1)
-    ax.add_patch(region_square)
+    def save_current_file_labels(self):
+        # Save current file's label data into self.file_labels
+        if self.current_file_path is not None:
+            entries = []
+            for entry in self.placed_labels:
+                entries.append({"label": entry["label"], "time": entry["time"], "signal": entry["signal"]})
+            self.file_labels[self.current_file_path] = entries
 
-    print("Labeling enabled. Click on the plot to start labeling.")
+    def load_file(self, file_path):
+        self.current_file_path = file_path
+        self.current_file_label.config(text=os.path.basename(file_path))
+        self.df = pd.read_csv(file_path)
+        # Assume CSV has columns 'Time' and 'Signal'
+        self.df['Signal'] = self.df['Signal'] - self.df['Signal'].min()
 
-# Function to generate the next label
-def next_label():
-    global label_counter, current_label
-    if label_counter < 26:  # From A to Z
-        current_label = chr(65 + label_counter)  # 65 is ASCII for 'A'
-    else:  # After Z, start 2A, 2B, etc.
-        current_label = f"{(label_counter // 26) + 1}{chr(65 + (label_counter % 26))}"
-    return current_label
+        # Clear and set up axes without disturbing layout
+        self.ax.cla()
+        self.ax.set_facecolor('black')
+        self.ax.set_xlabel("Time")
+        self.ax.set_ylabel("Signal")
+        # Plot original data and store as self.data_line
+        self.data_line, = self.ax.plot(self.df['Time'], self.df['Signal'], label="Original Data", color='white')
+        self.ax.legend(facecolor='black', edgecolor='white', labelcolor='white')
 
-# Function to skip the current letter
-def skip_letter():
-    global label_counter
-    label_counter += 1
-    update_cursor_label()
+        # Re-add region highlight and cursor annotation
+        self.ax.add_patch(self.region_square)
+        self.ax.add_artist(self.cursor_label_annotation)
 
-# Function to go back a letter without deleting the last label
-def go_back_letter():
-    global label_counter
-    if label_counter > 0:
-        label_counter -= 1
-    update_cursor_label()
+        # Reset current file labeling info and table
+        self.placed_labels = []
+        self.label_counter = 0
+        for item in self.tree.get_children():
+            self.tree.delete(item)
 
-# Function to delete the last placed label and associated point
-def delete_last_label():
-    global placed_labels, label_data, label_counter
-    if placed_labels:
-        last_label, last_dot = placed_labels.pop()  # Remove the last label and dot
-        last_label.remove()  # Remove the label annotation
-        last_dot.remove()  # Remove the red dot
-        label_data.pop()  # Remove the last label data entry
-        fig.canvas.draw_idle()
-        label_counter -= 1
+        # If there are previously saved labels for this file, restore them
+        if file_path in self.file_labels:
+            for entry in self.file_labels[file_path]:
+                label = entry["label"]
+                t = entry["time"]
+                s = entry["signal"]
+                ann = self.ax.annotate(label, (t, s), textcoords="offset points", xytext=(10, 10),
+                                       ha='center', color='yellow')
+                dot, = self.ax.plot(t, s, 'ro')
+                tree_id = self.tree.insert("", "end", values=(label, t, s))
+                self.placed_labels.append({"label": label, "time": t, "signal": s,
+                                           "ann": ann, "dot": dot, "tree_id": tree_id})
+                self.label_counter += 1
 
-# Function to update cursor label display as the mouse moves, including region size
-def update_cursor_label(event=None):
-    global cursor_label_annotation, custom_label_mode, region_size, region_square
-    next_label_text = next_label() if not custom_label_mode else "Custom"
+        self.fig.canvas.draw_idle()
 
-    if event and event.xdata is not None and event.ydata is not None:
-        cursor_label_annotation.xy = (event.xdata, event.ydata)
-        cursor_label_annotation.set_text(f"{next_label_text} (Region: {region_size:.2f})")
-# Update the region square position and size
-        region_square.set_xy((event.xdata - region_size / 2, ax.get_ylim()[0]))
-        region_square.set_width(region_size)
-    fig.canvas.draw_idle()
+        # Reset selectors
+        self.span_selector.set_active(True)
+        self.rectangle_selector.set_active(False)
+        self.mode = "point"
 
-# Function to find the closest data point to a given x (time)
-def find_closest_data_point(x):
-    global df_filtered
-    idx = (df_filtered['Time'] - x).abs().argmin()  # Find the index of the closest time value
-    return df_filtered.iloc[idx]['Time'], df_filtered.iloc[idx]['Signal']  # Return the time and signal at that index
-
-# Function to label the highest point within the region around x
-# Function to label the highest point within the region around x
-def on_click_label(event):
-    global label_counter, placed_labels, label_data, custom_label_mode
-    if event.inaxes is not None and event.button == 1:  # Left click
-        x = event.xdata
-
-        # Find the highest y-value within the region size around the clicked x
-        x_min = x - region_size / 2
-        x_max = x + region_size / 2
-        region_df = df_filtered[(df_filtered['Time'] >= x_min) & (df_filtered['Time'] <= x_max)]
-
-        if not region_df.empty:
-            max_point = region_df.loc[region_df['Signal'].idxmax()]
-            closest_time, closest_signal = max_point['Time'], max_point['Signal']
-
-            # Capture current axis limits
-            x_limits = ax.get_xlim()
-            y_limits = ax.get_ylim()
-
-            if custom_label_mode:
-                root = Tk()
-                root.withdraw()
-                custom_label = simpledialog.askstring("Custom Label", "Enter custom label:")
-                label = custom_label if custom_label else next_label()
-                custom_label_mode = False  # Reset the custom label mode after usage
+    # ------------------------
+    # Zooming Relative to Selected Region
+    # ------------------------
+    def on_span_select(self, xmin, xmax):
+        if self.df is not None:
+            self.df_filtered = self.df[(self.df['Time'] >= xmin) & (self.df['Time'] <= xmax)]
+            # Update the data line with the filtered data.
+            self.data_line.set_data(self.df_filtered['Time'], self.df_filtered['Signal'])
+            self.ax.set_xlim(xmin, xmax)
+            # Adjust y-axis: keep lower bound at 0 and add a 10% margin above the max.
+            y_data = self.df_filtered['Signal']
+            y_max = y_data.max()
+            margin = (y_max * 0.1) if y_max > 0 else 0.1
+            self.ax.set_ylim(0, y_max + margin)
+            self.fig.canvas.draw_idle()
+            if messagebox.askyesno("Confirm Section", f"Is this section okay for labeling?\nTime {xmin:.2f} to {xmax:.2f}?"):
+                self.span_selector.set_active(False)
             else:
-                label = next_label()
+                self.reset_zoom()
 
-            # Add label and dot to the plot
-            new_label = ax.annotate(label, (closest_time, closest_signal), textcoords="offset points", xytext=(10, 10),
-                                    ha='center', color='yellow')
-            new_dot, = ax.plot(closest_time, closest_signal, 'ro')
+    def reset_zoom(self):
+        if self.df is not None:
+            self.data_line.set_data(self.df['Time'], self.df['Signal'])
+            self.ax.set_xlim(self.df['Time'].min(), self.df['Time'].max())
+            self.ax.relim()
+            self.ax.autoscale_view()
+            self.fig.canvas.draw_idle()
+            self.span_selector.set_active(True)
 
-            label_data.append((label, closest_time, closest_signal))
-            placed_labels.append((new_label, new_dot))
+    # ------------------------
+    # Redrawing Existing Labels
+    # ------------------------
+    def redraw_labels(self):
+        # Re-create annotations and dots for each label in placed_labels.
+        for entry in self.placed_labels:
+            label = entry["label"]
+            t = entry["time"]
+            s = entry["signal"]
+            ann = self.ax.annotate(label, (t, s), textcoords="offset points", xytext=(10, 10),
+                                   ha='center', color='yellow')
+            dot, = self.ax.plot(t, s, 'ro')
+            entry["ann"] = ann
+            entry["dot"] = dot
 
-            # Restore axis limits
-            ax.set_xlim(x_limits)
-            ax.set_ylim(y_limits)
+    # ------------------------
+    # Labeling Functions
+    # ------------------------
+    def on_click(self, event):
+        # In select mode do nothing to prevent unwanted label creation.
+        if self.mode != "point":
+            return
+        if hasattr(event, "inaxes") and event.inaxes == self.ax and event.button == 1:
+            x = event.xdata
+            # Define region centered at the cursor, width = region_size.
+            x_min = x - self.region_size / 2
+            x_max = x + self.region_size / 2
+            df_to_search = self.df_filtered if self.df_filtered is not None else self.df
+            region_df = df_to_search[(df_to_search['Time'] >= x_min) & (df_to_search['Time'] <= x_max)]
+            if not region_df.empty:
+                max_point = region_df.loc[region_df['Signal'].idxmax()]
+                t = max_point['Time']
+                s = max_point['Signal']
+                if self.custom_label_mode:
+                    custom = simpledialog.askstring("Custom Label", "Enter custom label:")
+                    label = custom if custom else self.next_label()
+                    self.custom_label_mode = False
+                else:
+                    label = self.next_label()
+                ann = self.ax.annotate(label, (t, s), textcoords="offset points", xytext=(10, 10),
+                                       ha='center', color='yellow')
+                dot, = self.ax.plot(t, s, 'ro')
+                tree_id = self.tree.insert("", "end", values=(label, t, s))
+                entry = {"label": label, "time": t, "signal": s, "ann": ann, "dot": dot, "tree_id": tree_id}
+                self.placed_labels.append(entry)
+                self.label_counter += 1
+                self.fig.canvas.draw_idle()
 
-            plt.draw()
+    def on_rectangle_select(self, eclick, erelease):
+        # Only proceed if the selection is large enough.
+        if (abs(erelease.xdata - eclick.xdata) < 0.01) or (abs(erelease.ydata - eclick.ydata) < 0.01):
+            return
+        x_min, x_max = sorted([eclick.xdata, erelease.xdata])
+        y_min, y_max = sorted([eclick.ydata, erelease.ydata])
+        df_to_search = self.df_filtered if self.df_filtered is not None else self.df
+        region_df = df_to_search[(df_to_search['Time'] >= x_min) & (df_to_search['Time'] <= x_max) &
+                                  (df_to_search['Signal'] >= y_min) & (df_to_search['Signal'] <= y_max)]
+        if not region_df.empty:
+            times = region_df['Time'].values
+            signals = region_df['Signal'].values
+            # Identify local maxima using a simple neighbor comparison.
+            peak_indices = []
+            for i in range(1, len(signals) - 1):
+                if signals[i] > signals[i - 1] and signals[i] > signals[i + 1]:
+                    peak_indices.append(i)
+            # Sort peaks by time and label them numerically (using current counter).
+            for idx, i in enumerate(sorted(peak_indices), start=1):
+                t = times[i]
+                s = signals[i]
+                label = str(self.label_counter + 1)  # numeric label.
+                ann = self.ax.annotate(label, (t, s), textcoords="offset points", xytext=(10, 10),
+                                       ha='center', color='yellow')
+                dot, = self.ax.plot(t, s, 'ro')
+                tree_id = self.tree.insert("", "end", values=(label, t, s))
+                entry = {"label": label, "time": t, "signal": s, "ann": ann, "dot": dot, "tree_id": tree_id}
+                self.placed_labels.append(entry)
+                self.label_counter += 1
+            self.fig.canvas.draw_idle()
+        # After rectangle selection, revert to point mode.
+        self.rectangle_selector.set_active(False)
+        self.mode = "point"
 
-            label_counter += 1  # Move to the next label after a click
-            update_cursor_label()
+    def next_label(self):
+        # In point mode, use alphabetical labels.
+        if self.label_counter < 26:
+            return chr(65 + self.label_counter)  # 'A' to 'Z'
+        else:
+            return f"{(self.label_counter // 26) + 1}{chr(65 + (self.label_counter % 26))}"
 
+    def update_cursor_label(self, event):
+        if not hasattr(event, "inaxes") or event.inaxes != self.ax:
+            return
+        if event.xdata is None or event.ydata is None:
+            return
+        x_center = event.xdata
+        next_lab = self.next_label() if not self.custom_label_mode else "Custom"
+        self.cursor_label_annotation.xy = (event.xdata, event.ydata)
+        self.cursor_label_annotation.set_text(f"Next: {next_lab}")
+        self.region_square.set_xy((x_center - self.region_size / 2, self.ax.get_ylim()[0]))
+        height = self.ax.get_ylim()[1] - self.ax.get_ylim()[0]
+        self.region_square.set_height(height)
+        self.region_square.set_width(self.region_size)
+        self.fig.canvas.draw_idle()
 
-# Function to handle key press events (for 'Enter', 'x', 'c', 'd', and 'L')
-def on_key_press(event):
-    global custom_label_mode
-    if event.key == 'enter':
-        save_plot_and_data()
-    elif event.key == 'c':
-        skip_letter()
-    elif event.key == 'x':
-        go_back_letter()
-    elif event.key == 'd':
-        delete_last_label()
-    elif event.key == 'z':
-        delete_last_label()
-    elif event.key == 'L':
-        custom_label_mode = True
-        go_back_letter()
-    elif event.key == 's':
-        skip_letter()
-        go_back_letter()
+    def on_scroll(self, event):
+        if event.button == 'up':
+            self.region_size = min(100, self.region_size * 1.2)
+        elif event.button == 'down':
+            self.region_size = max(0.1, self.region_size * 0.9)
+        self.update_cursor_label(event)
 
+    # ------------------------
+    # Key Bindings
+    # ------------------------
+    def on_key_press(self, event):
+        # Pressing 'b' stops displaying the rectangle selection box.
+        if event.keysym.lower() == "b":
+            if self.mode == "select":
+                self.rectangle_selector.set_active(False)
+                # Hide the rectangle artist if available.
+                if hasattr(self.rectangle_selector, "rect") and self.rectangle_selector.rect is not None:
+                    self.rectangle_selector.rect.set_visible(False)
+                    self.canvas.draw_idle()
+                self.mode = "point"
+                return
 
+        key = event.keysym.lower()
+        if key == "return":
+            self.save_plot_and_data()
+        elif key == "c":
+            self.label_counter += 1
+            self.update_cursor_label(event)
+        elif key == "x":
+            if self.label_counter > 0:
+                self.label_counter -= 1
+                self.update_cursor_label(event)
+        elif key in ("d", "z"):
+            self.undo_last_label()
+        elif key == "l":
+            self.custom_label_mode = True
+            if self.label_counter > 0:
+                self.label_counter -= 1
+            self.update_cursor_label(event)
+        elif key == "m":
+            if self.mode == "point":
+                self.mode = "select"
+                self.rectangle_selector.set_active(True)
+                messagebox.showinfo("Mode Change", "Select mode activated: drag to select multiple peaks.")
+            else:
+                self.mode = "point"
+                self.rectangle_selector.set_active(False)
+                messagebox.showinfo("Mode Change", "Point mode activated.")
+        elif key == "h":
+            self.show_help()
 
-# Function to save the plot and label data
-def save_plot_and_data():
-    root = Tk()
-    root.withdraw()
+    def undo_last_label(self):
+        if self.placed_labels:
+            entry = self.placed_labels.pop()
+            try:
+                entry["ann"].remove()
+            except Exception:
+                entry["ann"].set_visible(False)
+            try:
+                entry["dot"].remove()
+            except Exception:
+                pass
+            self.tree.delete(entry["tree_id"])
+            self.label_counter = max(0, self.label_counter - 1)
+            self.fig.canvas.draw_idle()
 
-    file_path = filedialog.asksaveasfilename(
-        defaultextension=".png",
-        filetypes=[("PNG files", "*.png")],
-        title="Save plot as..."
-    )
-    if file_path:
-        ax.set_title('')
-        legend = ax.get_legend()
-        if legend is not None:
-            legend.remove()
-        fig.savefig(file_path, transparent=True)
-        print(f"Plot saved as {file_path} with a transparent background.")
+    # ------------------------
+    # Table Management and Editing
+    # ------------------------
+    def delete_selected_label(self):
+        selected_items = self.tree.selection()
+        if selected_items:
+            for item in selected_items:
+                for entry in self.placed_labels:
+                    if entry["tree_id"] == item:
+                        try:
+                            entry["ann"].remove()
+                        except Exception:
+                            entry["ann"].set_visible(False)
+                        try:
+                            entry["dot"].remove()
+                        except Exception:
+                            pass
+                        self.placed_labels.remove(entry)
+                        break
+                self.tree.delete(item)
+            self.fig.canvas.draw_idle()
 
-    excel_path = filedialog.asksaveasfilename(
-        defaultextension=".xlsx",
-        filetypes=[("Excel files", "*.xlsx")],
-        title="Save label data as..."
-    )
-    if excel_path:
-        df_labels = pd.DataFrame(label_data, columns=['Label', 'Time', 'Signal'])
-        df_labels.to_excel(excel_path, index=False)
-        print(f"Label data saved to {excel_path}.")
+    def on_tree_double_click(self, event):
+        item = self.tree.identify_row(event.y)
+        if item:
+            current_values = self.tree.item(item, "values")
+            new_label = simpledialog.askstring("Edit Label", "Enter new label:", initialvalue=current_values[0])
+            if new_label:
+                self.tree.item(item, values=(new_label, current_values[1], current_values[2]))
+                for entry in self.placed_labels:
+                    if entry["tree_id"] == item:
+                        entry["label"] = new_label
+                        entry["ann"].set_text(new_label)
+                        self.fig.canvas.draw_idle()
+                        break
 
-# Function to detect the scroll wheel event and adjust region size
-def on_scroll(event):
-    global region_size
-    if event.button == 'up':  # Scroll up to increase region size
-        region_size = min(100, region_size * 1.2)  # Limit region size to 100
-    elif event.button == 'down':  # Scroll down to decrease region size
-        region_size = max(0.1, region_size * 0.9)  # Ensure region size doesn't get too small
-    update_cursor_label(event)
+    # ------------------------
+    # Saving Functionality (using only pandas for Excel)
+    # ------------------------
+    def save_plot_and_data(self):
+        self.save_current_file_labels()
+        # Create "LabeledPlots" folder in the current file's directory.
+        if self.current_file_path is not None:
+            data_folder = os.path.dirname(self.current_file_path)
+        else:
+            data_folder = os.getcwd()
+        save_folder = os.path.join(data_folder, "LabeledPlots")
+        if not os.path.exists(save_folder):
+            os.makedirs(save_folder)
+        # Save plot as PNG
+        plot_filename = filedialog.asksaveasfilename(initialdir=save_folder, defaultextension=".png",
+                                                      filetypes=[("PNG files", "*.png")],
+                                                      title="Save plot as...")
+        if plot_filename:
+            self.ax.set_title('')
+            leg = self.ax.get_legend()
+            if leg is not None:
+                leg.remove()
+            self.fig.savefig(plot_filename, transparent=True)
+            messagebox.showinfo("Saved", f"Plot saved as {plot_filename}")
+        # Save label data as Excel using only pandas.
+        data_filename = filedialog.asksaveasfilename(initialdir=save_folder, defaultextension=".xlsx",
+                                                     filetypes=[("Excel files", "*.xlsx")],
+                                                     title="Save label data as...")
+        if data_filename:
+            if self.current_file_path in self.file_labels:
+                df_labels = pd.DataFrame(self.file_labels[self.current_file_path])
+            else:
+                df_labels = pd.DataFrame(columns=["label", "time", "signal"])
+            try:
+                df_labels.to_excel(data_filename, index=False)
+                messagebox.showinfo("Saved", f"Label data saved to {data_filename}")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to save Excel file:\n{e}")
 
-# Connect the scroll event to adjust region size
-def connect_scroll_event():
-    fig.canvas.mpl_connect('scroll_event', on_scroll)
+    # ------------------------
+    # Help Popup
+    # ------------------------
+    def show_help(self):
+        help_text = (
+            "Keyboard Shortcuts:\n"
+            "Enter: Save plot and data (creates 'LabeledPlots' folder in data file's directory)\n"
+            "c: Skip current letter\n"
+            "x: Go back a letter\n"
+            "d or z: Undo last label\n"
+            "b: Cancel rectangle selection and hide selection box\n"
+            "L: Custom label mode\n"
+            "m: Toggle between point mode and select mode (for multiple peaks selection)\n"
+            "h: Show this help message\n"
+            "\n"
+            "Other Commands:\n"
+            "- Use 'Import Files' to select multiple CSV files (or scan a folder).\n"
+            "- Navigate files with the Prev/Next buttons or the dropdown.\n"
+            "- In point mode, click on the plot to label the relative maximum within the highlighted region.\n"
+            "- In select mode, drag a rectangle (of sufficient size) to select multiple peaks; they will be labeled numerically (left-to-right).\n"
+            "- Press 'b' to cancel rectangle selection and hide the selection box.\n"
+            "- Delete a label by selecting it in the table and clicking 'Delete Selected Label'.\n"
+            "- Double-click a label in the table to edit it (graph annotation updates accordingly).\n"
+        )
+        messagebox.showinfo("Help", help_text)
 
-# Start the program by selecting a CSV file
-select_csv_file()
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = DataLabelingApp(root)
+    root.mainloop()

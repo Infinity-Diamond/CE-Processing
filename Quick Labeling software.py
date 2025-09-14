@@ -52,6 +52,18 @@ class DataLabelingApp:
         self.import_button = tk.Button(self.left_frame, text="Import Files", command=self.import_files)
         self.import_button.pack(pady=5)
 
+        # Button to optionally select a section (activates zoom/confirm flow)
+        self.select_section_button = tk.Button(self.left_frame, text="Select Section", command=self.start_section_selection)
+        self.select_section_button.pack(pady=5)
+
+        # Reset zoom to full view
+        self.reset_zoom_button = tk.Button(self.left_frame, text="Reset Zoom", command=self.reset_zoom)
+        self.reset_zoom_button.pack(pady=5)
+
+        # Toggle Select Mode (rectangle multiple-peaks selection)
+        self.toggle_select_button = tk.Button(self.left_frame, text="Toggle Select Mode", command=self.toggle_select_mode)
+        self.toggle_select_button.pack(pady=5)
+
         # Manual Save Button for current datafile (labels & plot)
         self.save_button = tk.Button(self.left_frame, text="Save File", command=self.save_plot_and_data)
         self.save_button.pack(pady=5)
@@ -87,6 +99,11 @@ class DataLabelingApp:
         self.ax.tick_params(axis='x', colors='white')
         self.ax.tick_params(axis='y', colors='white')
 
+        # Status bar at the bottom of the right frame
+        self.status_var = tk.StringVar(value="Ready. Import a file to begin.")
+        self.status_label = tk.Label(self.right_frame, textvariable=self.status_var, anchor='w')
+        self.status_label.pack(fill=tk.X)
+
         # ------------------------
         # Global and State Variables
         # ------------------------
@@ -95,6 +112,8 @@ class DataLabelingApp:
         self.file_list = []         # List of imported file paths
         self.current_file_index = 0 # Index for carousel
         self.current_file_path = None
+        self.initial_xlim = None
+        self.initial_ylim = None
 
         # For current file: list of placed label dictionaries:
         # Each entry: {"label": label, "time": t, "signal": s, "ann": annotation, "dot": dot, "tree_id": tree id}
@@ -117,6 +136,7 @@ class DataLabelingApp:
         # SpanSelector for zooming (for analysis)
         self.span_selector = SpanSelector(self.ax, self.on_span_select, "horizontal", useblit=True,
                                           props=dict(alpha=0.5, facecolor='red'))
+        self.span_selector.set_active(False)
         # RectangleSelector for multi-select mode (initially inactive)
         self.rectangle_selector = RectangleSelector(self.ax, self.on_rectangle_select, useblit=True,
                                                       button=[1], interactive=True)
@@ -136,6 +156,9 @@ class DataLabelingApp:
         # Bind keys to the main window (pressing 'b' cancels rectangle selection and hides the box)
         self.master.bind("<Key>", self.on_key_press)
 
+        # Disable controls that require a file until one is loaded
+        self.set_controls_enabled(False)
+
     # ------------------------
     # File Import and Carousel/Dropdown Functions
     # ------------------------
@@ -153,6 +176,7 @@ class DataLabelingApp:
             self.current_file_index = 0
             self.load_file(self.file_list[self.current_file_index])
             self.file_dropdown.current(self.current_file_index)
+            self.set_controls_enabled(True)
 
     def prev_file(self):
         if self.file_list:
@@ -186,9 +210,13 @@ class DataLabelingApp:
     def load_file(self, file_path):
         self.current_file_path = file_path
         self.current_file_label.config(text=os.path.basename(file_path))
-        self.df = pd.read_csv(file_path)
-        # Assume CSV has columns 'Time' and 'Signal'
-        self.df['Signal'] = self.df['Signal'] - self.df['Signal'].min()
+        raw_df = pd.read_csv(file_path)
+        # Detect time and signal columns robustly
+        time_col, signal_col = self.detect_time_signal_columns(raw_df)
+        df = raw_df[[time_col, signal_col]].copy()
+        df.columns = ['Time', 'Signal']
+        df['Signal'] = df['Signal'] - df['Signal'].min()
+        self.df = df
 
         # Clear and set up axes without disturbing layout
         self.ax.cla()
@@ -198,6 +226,11 @@ class DataLabelingApp:
         # Plot original data and store as self.data_line
         self.data_line, = self.ax.plot(self.df['Time'], self.df['Signal'], label="Original Data", color='white')
         self.ax.legend(facecolor='black', edgecolor='white', labelcolor='white')
+        # Capture initial limits
+        self.ax.relim()
+        self.ax.autoscale_view()
+        self.initial_xlim = self.ax.get_xlim()
+        self.initial_ylim = self.ax.get_ylim()
 
         # Re-add region highlight and cursor annotation
         self.ax.add_patch(self.region_square)
@@ -226,9 +259,19 @@ class DataLabelingApp:
         self.fig.canvas.draw_idle()
 
         # Reset selectors
-        self.span_selector.set_active(True)
+        # Do not force section selection on load; user can press "Select Section" if needed
+        self.span_selector.set_active(False)
         self.rectangle_selector.set_active(False)
         self.mode = "point"
+        self.df_filtered = None
+        # Enable/disable carousel buttons
+        if len(self.file_list) > 1:
+            self.prev_button.config(state=tk.NORMAL)
+            self.next_button.config(state=tk.NORMAL)
+        else:
+            self.prev_button.config(state=tk.DISABLED)
+            self.next_button.config(state=tk.DISABLED)
+        self.update_status_bar()
 
     # ------------------------
     # Zooming Relative to Selected Region
@@ -249,15 +292,54 @@ class DataLabelingApp:
                 self.span_selector.set_active(False)
             else:
                 self.reset_zoom()
+                self.span_selector.set_active(True)
+            self.update_status_bar()
 
     def reset_zoom(self):
         if self.df is not None:
             self.data_line.set_data(self.df['Time'], self.df['Signal'])
+            if self.initial_xlim is not None and self.initial_ylim is not None:
+                self.ax.set_xlim(self.initial_xlim)
+                self.ax.set_ylim(self.initial_ylim)
+            else:
+                self.ax.set_xlim(self.df['Time'].min(), self.df['Time'].max())
+                self.ax.relim()
+                self.ax.autoscale_view()
+            self.fig.canvas.draw_idle()
+            # Keep span selector state unchanged here
+            self.df_filtered = None
+            self.update_status_bar()
+
+    def start_section_selection(self):
+        # Enable the span selector to let the user drag-select a section
+        if self.df is None:
+            messagebox.showinfo("Select Section", "Import a file first, then try again.")
+            return
+        # Reset any previous filter view to initial range before selecting
+        self.data_line.set_data(self.df['Time'], self.df['Signal'])
+        if self.initial_xlim is not None and self.initial_ylim is not None:
+            self.ax.set_xlim(self.initial_xlim)
+            self.ax.set_ylim(self.initial_ylim)
+        else:
             self.ax.set_xlim(self.df['Time'].min(), self.df['Time'].max())
             self.ax.relim()
             self.ax.autoscale_view()
-            self.fig.canvas.draw_idle()
-            self.span_selector.set_active(True)
+        self.fig.canvas.draw_idle()
+        self.df_filtered = None
+        self.span_selector.set_active(True)
+        messagebox.showinfo("Select Section", "Drag horizontally on the plot to choose a section, then confirm.")
+        self.update_status_bar()
+
+    def toggle_select_mode(self):
+        if self.mode == "point":
+            self.mode = "select"
+            self.rectangle_selector.set_active(True)
+            messagebox.showinfo("Mode Change", "Select mode activated: drag to select multiple peaks.")
+        else:
+            self.mode = "point"
+            self.rectangle_selector.set_active(False)
+            messagebox.showinfo("Mode Change", "Point mode activated.")
+        self.update_status_bar()
 
     # ------------------------
     # Redrawing Existing Labels
@@ -306,6 +388,7 @@ class DataLabelingApp:
                 self.placed_labels.append(entry)
                 self.label_counter += 1
                 self.fig.canvas.draw_idle()
+                self.update_status_bar()
 
     def on_rectangle_select(self, eclick, erelease):
         # Only proceed if the selection is large enough.
@@ -340,6 +423,7 @@ class DataLabelingApp:
         # After rectangle selection, revert to point mode.
         self.rectangle_selector.set_active(False)
         self.mode = "point"
+        self.update_status_bar()
 
     def next_label(self):
         # In point mode, use alphabetical labels.
@@ -362,6 +446,7 @@ class DataLabelingApp:
         self.region_square.set_height(height)
         self.region_square.set_width(self.region_size)
         self.fig.canvas.draw_idle()
+        self.update_status_bar()
 
     def on_scroll(self, event):
         if event.button == 'up':
@@ -403,14 +488,7 @@ class DataLabelingApp:
                 self.label_counter -= 1
             self.update_cursor_label(event)
         elif key == "m":
-            if self.mode == "point":
-                self.mode = "select"
-                self.rectangle_selector.set_active(True)
-                messagebox.showinfo("Mode Change", "Select mode activated: drag to select multiple peaks.")
-            else:
-                self.mode = "point"
-                self.rectangle_selector.set_active(False)
-                messagebox.showinfo("Mode Change", "Point mode activated.")
+            self.toggle_select_mode()
         elif key == "h":
             self.show_help()
 
@@ -428,6 +506,7 @@ class DataLabelingApp:
             self.tree.delete(entry["tree_id"])
             self.label_counter = max(0, self.label_counter - 1)
             self.fig.canvas.draw_idle()
+            self.update_status_bar()
 
     # ------------------------
     # Table Management and Editing
@@ -450,6 +529,7 @@ class DataLabelingApp:
                         break
                 self.tree.delete(item)
             self.fig.canvas.draw_idle()
+            self.update_status_bar()
 
     def on_tree_double_click(self, event):
         item = self.tree.identify_row(event.y)
@@ -478,31 +558,34 @@ class DataLabelingApp:
         save_folder = os.path.join(data_folder, "LabeledPlots")
         if not os.path.exists(save_folder):
             os.makedirs(save_folder)
-        # Save plot as PNG
-        plot_filename = filedialog.asksaveasfilename(initialdir=save_folder, defaultextension=".png",
-                                                      filetypes=[("PNG files", "*.png")],
-                                                      title="Save plot as...")
-        if plot_filename:
-            self.ax.set_title('')
-            leg = self.ax.get_legend()
-            if leg is not None:
-                leg.remove()
-            self.fig.savefig(plot_filename, transparent=True)
-            messagebox.showinfo("Saved", f"Plot saved as {plot_filename}")
-        # Save label data as Excel using only pandas.
-        data_filename = filedialog.asksaveasfilename(initialdir=save_folder, defaultextension=".xlsx",
-                                                     filetypes=[("Excel files", "*.xlsx")],
-                                                     title="Save label data as...")
-        if data_filename:
-            if self.current_file_path in self.file_labels:
-                df_labels = pd.DataFrame(self.file_labels[self.current_file_path])
-            else:
-                df_labels = pd.DataFrame(columns=["label", "time", "signal"])
+        # Single prompt for base name; save both PNG and XLSX
+        base_filename = filedialog.asksaveasfilename(initialdir=save_folder, defaultextension=".xlsx",
+                                                     filetypes=[("Excel files", "*.xlsx"), ("All files", "*.*")],
+                                                     title="Save labeled plot and data as...")
+        if base_filename:
             try:
-                df_labels.to_excel(data_filename, index=False)
-                messagebox.showinfo("Saved", f"Label data saved to {data_filename}")
+                # Ensure we have a base without extension for PNG
+                base_root, base_ext = os.path.splitext(base_filename)
+                png_path = base_root + ".png"
+                xlsx_path = base_root + ".xlsx"
+
+                # Save plot
+                self.ax.set_title('')
+                leg = self.ax.get_legend()
+                if leg is not None:
+                    leg.remove()
+                self.fig.savefig(png_path, transparent=True)
+
+                # Save data
+                if self.current_file_path in self.file_labels:
+                    df_labels = pd.DataFrame(self.file_labels[self.current_file_path])
+                else:
+                    df_labels = pd.DataFrame(columns=["label", "time", "signal"])
+                df_labels.to_excel(xlsx_path, index=False)
+
+                messagebox.showinfo("Saved", f"Saved:\n{png_path}\n{xlsx_path}")
             except Exception as e:
-                messagebox.showerror("Error", f"Failed to save Excel file:\n{e}")
+                messagebox.showerror("Error", f"Failed to save files:\n{e}")
 
     # ------------------------
     # Help Popup
@@ -523,12 +606,66 @@ class DataLabelingApp:
             "- Use 'Import Files' to select multiple CSV files (or scan a folder).\n"
             "- Navigate files with the Prev/Next buttons or the dropdown.\n"
             "- In point mode, click on the plot to label the relative maximum within the highlighted region.\n"
+            "- Use 'Select Section' to enable horizontal drag selection to zoom into a region for labeling.\n"
+            "- Use 'Reset Zoom' to return to the initial full view from import.\n"
+            "- Use 'Toggle Select Mode' to switch rectangle selection on/off.\n"
             "- In select mode, drag a rectangle (of sufficient size) to select multiple peaks; they will be labeled numerically (left-to-right).\n"
             "- Press 'b' to cancel rectangle selection and hide the selection box.\n"
             "- Delete a label by selecting it in the table and clicking 'Delete Selected Label'.\n"
             "- Double-click a label in the table to edit it (graph annotation updates accordingly).\n"
         )
         messagebox.showinfo("Help", help_text)
+
+    # ------------------------
+    # Utility & Setup
+    # ------------------------
+    def set_controls_enabled(self, enabled: bool):
+        state = tk.NORMAL if enabled else tk.DISABLED
+        for btn in [self.select_section_button, self.reset_zoom_button, self.toggle_select_button, self.save_button, self.delete_button]:
+            btn.config(state=state)
+        # Prev/Next managed per file count in load_file
+
+    def update_status_bar(self):
+        mode_text = f"Mode: {self.mode}"
+        next_lab = self.next_label() if not self.custom_label_mode else "Custom"
+        status = f"{mode_text} | Next label: {next_lab} | Region width: {self.region_size:.2f}"
+        self.status_var.set(status)
+
+    def detect_time_signal_columns(self, df: pd.DataFrame):
+        candidates_time = ["time", "t", "timestamp", "sec", "seconds", "x"]
+        candidates_signal = ["signal", "intensity", "value", "amplitude", "y"]
+        lower_cols = {c.lower(): c for c in df.columns}
+
+        time_col = None
+        signal_col = None
+        for name in candidates_time:
+            if name in lower_cols:
+                time_col = lower_cols[name]
+                break
+        for name in candidates_signal:
+            if name in lower_cols and lower_cols[name] != time_col:
+                signal_col = lower_cols[name]
+                break
+
+        if time_col is None or signal_col is None:
+            numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+            if len(numeric_cols) >= 2:
+                best_time = None
+                for c in numeric_cols:
+                    series = df[c].dropna()
+                    if series.is_monotonic_increasing:
+                        best_time = c
+                        break
+                time_col = time_col or best_time or numeric_cols[0]
+                remaining = [c for c in numeric_cols if c != time_col]
+                signal_col = signal_col or (remaining[0] if remaining else numeric_cols[0])
+            elif len(df.columns) >= 2:
+                time_col = df.columns[0]
+                signal_col = df.columns[1]
+            else:
+                raise ValueError("Unable to detect suitable Time and Signal columns.")
+
+        return time_col, signal_col
 
 if __name__ == "__main__":
     root = tk.Tk()

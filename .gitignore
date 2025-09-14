@@ -1,1 +1,13 @@
 /.venv
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+/peak_fit.log
+/.pytest_cache/
+/.vscode/
+/dist/
+/build/
+/*.spec
+/.idea/
